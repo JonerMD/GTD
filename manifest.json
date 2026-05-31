@@ -1,0 +1,9 @@
+{
+  "id": "joner-gtd",
+  "name": "Joner GTD",
+  "version": "0.0.1",
+  "minAppVersion": "1.5.0",
+  "description": "GTD-system: Inbox, Projects, Next Actions, Weekly Review.",
+  "author": "Jonathan Vela",
+  "isDesktopOnly": false
+}
