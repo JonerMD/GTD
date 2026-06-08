@@ -65,6 +65,11 @@ export default class JonerGTDPlugin extends Plugin {
     );
 
     // --- Ribbon-ikoner ---
+    this.addRibbonIcon("inbox", "GTD: Hurtig capture til Inbox", () => {
+      new QuickCaptureModal(this.app, async (text) => {
+        await this.appendToInbox(text);
+      }).open();
+    });
     this.addRibbonIcon("check-circle-2", "Åbn GTD Dashboard", () => {
       void this.activateDashboard();
     });

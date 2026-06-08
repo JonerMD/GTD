@@ -10600,6 +10600,11 @@ var JonerGTDPlugin = class extends import_obsidian8.Plugin {
       VIEW_TYPE_ACTION_SIDEBAR,
       (leaf) => new ActionSidebarView(leaf)
     );
+    this.addRibbonIcon("inbox", "GTD: Hurtig capture til Inbox", () => {
+      new QuickCaptureModal(this.app, async (text) => {
+        await this.appendToInbox(text);
+      }).open();
+    });
     this.addRibbonIcon("check-circle-2", "\xC5bn GTD Dashboard", () => {
       void this.activateDashboard();
     });
