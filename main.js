@@ -307,6 +307,108 @@ function getFrontmatterString(app, file, key) {
     return void 0;
   return String(value);
 }
+function isoFromParts(y, mo, d) {
+  if (mo < 1 || mo > 12 || d < 1 || d > 31)
+    return null;
+  const date = new Date(y, mo - 1, d);
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) {
+    return null;
+  }
+  const mm = String(mo).padStart(2, "0");
+  const dd = String(d).padStart(2, "0");
+  return `${y}-${mm}-${dd}`;
+}
+function parseDateExpression(raw) {
+  var _a;
+  const expr = raw.trim().toLowerCase();
+  if (!expr)
+    return null;
+  let m = expr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m)
+    return isoFromParts(+m[1], +m[2], +m[3]);
+  m = expr.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+  if (m) {
+    let year = +m[3];
+    if (year < 100)
+      year += 2e3;
+    return isoFromParts(year, +m[2], +m[1]);
+  }
+  const rel = expr.match(/^\+?(\d+)\s*([duwmy])?$/);
+  if (!rel)
+    return null;
+  const amount = parseInt(rel[1], 10);
+  const unit = (_a = rel[2]) != null ? _a : "d";
+  if (!Number.isFinite(amount))
+    return null;
+  const d = /* @__PURE__ */ new Date();
+  d.setHours(0, 0, 0, 0);
+  switch (unit) {
+    case "d":
+      d.setDate(d.getDate() + amount);
+      break;
+    case "u":
+    case "w":
+      d.setDate(d.getDate() + amount * 7);
+      break;
+    case "m":
+      d.setMonth(d.getMonth() + amount);
+      break;
+    case "y":
+      d.setFullYear(d.getFullYear() + amount);
+      break;
+    default:
+      return null;
+  }
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+var NOTE_RE = /%% gtd-note-start %%\n?([\s\S]*?)\n?%% gtd-note-end %%/;
+function getNoteSection(content) {
+  const m = content.match(NOTE_RE);
+  return m ? m[1] : "";
+}
+function setNoteSection(content, note) {
+  const trimmed = note.replace(/\s+$/, "");
+  const hasBlock = NOTE_RE.test(content);
+  if (trimmed === "") {
+    if (!hasBlock)
+      return content;
+    return content.replace(
+      /\n*%% gtd-note-start %%\n?[\s\S]*?\n?%% gtd-note-end %%\n*/,
+      "\n"
+    ).replace(/\n{3,}/g, "\n\n");
+  }
+  const block = `%% gtd-note-start %%
+${trimmed}
+%% gtd-note-end %%`;
+  if (hasBlock) {
+    return content.replace(NOTE_RE, block);
+  }
+  const sep = content.endsWith("\n") ? "" : "\n";
+  return `${content}${sep}
+${block}
+`;
+}
+async function ensureSomedayFile(app) {
+  const existing = app.vault.getAbstractFileByPath(SOMEDAY_LOG);
+  if (existing instanceof import_obsidian.TFile)
+    return existing;
+  await ensureFolder(app, GTD_FOLDER);
+  return await app.vault.create(
+    SOMEDAY_LOG,
+    "# Someday / Maybe\n\nLet liste over ting du m\xE5ske vil g\xF8re engang.\n\n"
+  );
+}
+async function appendSomedayItem(app, text) {
+  const file = await ensureSomedayFile(app);
+  const line = `- [ ] ${text} \u2795 ${todayISO()}`;
+  const current = await app.vault.read(file);
+  const needsNewline = current.length > 0 && !current.endsWith("\n");
+  const next = current + (needsNewline ? "\n" : "") + line + "\n";
+  await app.vault.modify(file, next);
+}
 
 // src/task-edit-modal.ts
 var TaskEditModal = class extends import_obsidian2.Modal {
@@ -358,6 +460,19 @@ var TaskEditModal = class extends import_obsidian2.Modal {
     this.doneEl = doneWrap.createEl("input", { type: "checkbox" });
     this.doneEl.checked = this.task.done;
     doneWrap.createEl("label", { text: "Afsluttet" });
+    const hierWrap = contentEl.createDiv();
+    hierWrap.style.marginTop = "12px";
+    hierWrap.style.display = "flex";
+    hierWrap.style.alignItems = "center";
+    hierWrap.style.gap = "8px";
+    hierWrap.createEl("span", {
+      text: "Hierarki:",
+      cls: "setting-item-name"
+    });
+    const outdentBtn = hierWrap.createEl("button", { text: "\u21E4 Ryk ud" });
+    outdentBtn.onclick = () => void this.changeIndent(-1);
+    const indentBtn = hierWrap.createEl("button", { text: "\u21E5 Ryk ind" });
+    indentBtn.onclick = () => void this.changeIndent(1);
     const buttonRow = contentEl.createDiv();
     buttonRow.style.marginTop = "18px";
     buttonRow.style.display = "flex";
@@ -375,6 +490,10 @@ var TaskEditModal = class extends import_obsidian2.Modal {
       await leaf.openFile(this.task.file, {
         eState: { line: this.task.lineNumber }
       });
+    };
+    const somedayBtn = leftBtns.createEl("button", { text: "\u{1F4A4} Til Someday" });
+    somedayBtn.onclick = async () => {
+      await this.moveToSomeday();
     };
     const deleteBtn = leftBtns.createEl("button", { text: "\u{1F5D1} Slet" });
     deleteBtn.onclick = async () => {
@@ -422,43 +541,40 @@ var TaskEditModal = class extends import_obsidian2.Modal {
     row.style.display = "flex";
     row.style.gap = "8px";
     row.style.marginTop = "4px";
-    row.style.marginBottom = "4px";
-    const input = row.createEl("input", { type: "date" });
+    row.style.marginBottom = "10px";
+    const input = row.createEl("input", {
+      type: "text",
+      attr: { placeholder: "+1d \xB7 11/02/2026 \xB7 tom = ingen" }
+    });
     input.value = initialValue;
     input.style.flex = "1";
     input.style.padding = "6px 8px";
     input.style.fontSize = "13px";
+    const apply = () => {
+      const raw = input.value.trim();
+      if (raw === "")
+        return;
+      const parsed = parseDateExpression(raw);
+      if (!parsed) {
+        new import_obsidian2.Notice(
+          `Forstod ikke "${raw}". Brug fx +1d, +2m, 11/02/2026 eller 2026-02-11.`
+        );
+        return;
+      }
+      input.value = parsed;
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        apply();
+      }
+    });
+    input.addEventListener("blur", () => apply());
     const clearBtn = row.createEl("button", { text: "\xD7" });
     clearBtn.style.padding = "4px 10px";
     clearBtn.onclick = () => {
       input.value = "";
     };
-    const quickRow = parent.createDiv();
-    quickRow.style.display = "flex";
-    quickRow.style.gap = "4px";
-    quickRow.style.marginBottom = "10px";
-    const shortcuts = [
-      { label: "+1d", addDays: 1 },
-      { label: "+5d", addDays: 5 },
-      { label: "+1u", addDays: 7 },
-      { label: "+1m", addMonths: 1 }
-    ];
-    for (const sc of shortcuts) {
-      const btn = quickRow.createEl("button", { text: sc.label });
-      btn.style.padding = "3px 8px";
-      btn.style.fontSize = "11px";
-      btn.onclick = () => {
-        const base = input.value ? /* @__PURE__ */ new Date(input.value + "T00:00:00") : /* @__PURE__ */ new Date();
-        if (sc.addDays !== void 0)
-          base.setDate(base.getDate() + sc.addDays);
-        if (sc.addMonths !== void 0)
-          base.setMonth(base.getMonth() + sc.addMonths);
-        const y = base.getFullYear();
-        const m = String(base.getMonth() + 1).padStart(2, "0");
-        const d = String(base.getDate()).padStart(2, "0");
-        input.value = `${y}-${m}-${d}`;
-      };
-    }
     return input;
   }
   async save() {
@@ -472,14 +588,23 @@ var TaskEditModal = class extends import_obsidian2.Modal {
     const newDone = this.doneEl.checked;
     const checkmark = newDone ? "[x]" : "[ ]";
     const newTags = this.tagsEl.value.trim().split(/\s+/).map((t) => t.replace(/^#/, "")).filter((t) => t.length > 0);
+    const normalizeDate = (raw) => {
+      var _a2;
+      const v = raw.trim();
+      if (!v)
+        return "";
+      return (_a2 = parseDateExpression(v)) != null ? _a2 : "";
+    };
+    const dueVal = normalizeDate(this.dueEl.value);
+    const deferVal = normalizeDate(this.deferEl.value);
     const parts = [`${leadingWs}- ${checkmark}`, text];
     if (newTags.length > 0) {
       parts.push(newTags.map((t) => `#${t}`).join(" "));
     }
-    if (this.dueEl.value)
-      parts.push(`\u{1F4C5} ${this.dueEl.value}`);
-    if (this.deferEl.value)
-      parts.push(`\u23F3 ${this.deferEl.value}`);
+    if (dueVal)
+      parts.push(`\u{1F4C5} ${dueVal}`);
+    if (deferVal)
+      parts.push(`\u23F3 ${deferVal}`);
     if (this.task.createdDate)
       parts.push(`\u2795 ${this.task.createdDate}`);
     if (newDone) {
@@ -521,6 +646,75 @@ var TaskEditModal = class extends import_obsidian2.Modal {
       new import_obsidian2.Notice("Kunne ikke slette. Tjek konsollen.");
     }
   }
+  /** Ryk tasken (med dens sub-tasks) ind/ud i hierarkiet. */
+  async changeIndent(delta) {
+    try {
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+      const start = this.task.lineNumber;
+      if (start >= lines.length)
+        return;
+      const indentOf = (l) => {
+        let n = 0;
+        for (const c of l) {
+          if (c === " ")
+            n++;
+          else if (c === "	")
+            n += 4;
+          else
+            break;
+        }
+        return n;
+      };
+      const baseIndent = indentOf(lines[start]);
+      let end = start + 1;
+      while (end < lines.length) {
+        const l = lines[end];
+        if (l.trim() === "")
+          break;
+        if (indentOf(l) > baseIndent)
+          end++;
+        else
+          break;
+      }
+      if (delta === 1) {
+        for (let i = start; i < end; i++)
+          lines[i] = "	" + lines[i];
+      } else {
+        if (baseIndent === 0) {
+          new import_obsidian2.Notice("Tasken er allerede yderst.");
+          return;
+        }
+        for (let i = start; i < end; i++) {
+          lines[i] = lines[i].replace(/^(\t| {1,4})/, "");
+        }
+      }
+      await this.app.vault.modify(this.task.file, lines.join("\n"));
+      new import_obsidian2.Notice(delta === 1 ? "\u21E5 Rykket ind" : "\u21E4 Rykket ud");
+      this.close();
+    } catch (err) {
+      console.error("Joner GTD: fejl ved indrykning", err);
+      new import_obsidian2.Notice("Kunne ikke \xE6ndre hierarki.");
+    }
+  }
+  /** Flyt tasken til Someday-listen (append til Someday.md + fjern fra kilden). */
+  async moveToSomeday() {
+    try {
+      const text = this.textEl.value.trim() || this.task.text;
+      await appendSomedayItem(this.app, text);
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+      if (this.task.lineNumber < lines.length) {
+        lines.splice(this.task.lineNumber, 1);
+        await this.app.vault.modify(this.task.file, lines.join("\n"));
+      }
+      new import_obsidian2.Notice("\u{1F4A4} Flyttet til Someday / Maybe");
+      this.close();
+    } catch (err) {
+      console.error("Joner GTD: fejl ved flyt til Someday", err);
+      new import_obsidian2.Notice("Kunne ikke flytte. Tjek konsollen.");
+    }
+  }
   onClose() {
     this.contentEl.empty();
   }
@@ -541,12 +735,40 @@ var DashboardView = class extends import_obsidian3.ItemView {
     this.selectedProjectPath = null;
     this.selectedTag = null;
     this.collapsedFolders = /* @__PURE__ */ new Set();
+    this.collapsedTasks = /* @__PURE__ */ new Set();
     this.debouncedRender = (0, import_obsidian3.debounce)(
       () => void this.render(),
       200,
       true
     );
     this.callbacks = callbacks;
+    this.loadCollapsedTasks();
+  }
+  loadCollapsedTasks() {
+    try {
+      const raw = window.localStorage.getItem("joner-gtd:collapsed-tasks");
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          this.collapsedTasks = new Set(
+            arr.filter((x) => typeof x === "string")
+          );
+        }
+      }
+    } catch (e) {
+    }
+  }
+  saveCollapsedTasks() {
+    try {
+      window.localStorage.setItem(
+        "joner-gtd:collapsed-tasks",
+        JSON.stringify(Array.from(this.collapsedTasks))
+      );
+    } catch (e) {
+    }
+  }
+  taskKey(task) {
+    return `${task.file.path}::${task.text}`;
   }
   getViewType() {
     return VIEW_TYPE_DASHBOARD;
@@ -602,6 +824,10 @@ var DashboardView = class extends import_obsidian3.ItemView {
     root.addClass("gtd-dashboard");
     const toolbar = root.createDiv({ cls: "gtd-toolbar" });
     await this.renderToolbar(toolbar);
+    if (import_obsidian3.Platform.isPhone) {
+      await this.renderMobileBody(root);
+      return;
+    }
     const body = root.createDiv({ cls: "gtd-body" });
     const showSidebar = this.currentPerspective !== "inbox" && this.currentPerspective !== "naeste" && this.currentPerspective !== "forecast" && this.currentPerspective !== "review" && this.currentPerspective !== "defer" && this.currentPerspective !== "singles";
     const showInspector = (this.currentPerspective === "projects" || this.currentPerspective === "someday" || this.currentPerspective === "archive") && this.selectedProjectPath !== null;
@@ -626,6 +852,49 @@ var DashboardView = class extends import_obsidian3.ItemView {
         await this.renderInspector(inspector, file);
       }
     }
+  }
+  /* ============================================================
+     MOBIL-LAYOUT — én kolonne ad gangen (iPhone)
+     ============================================================ */
+  async renderMobileBody(root) {
+    const body = root.createDiv({ cls: "gtd-body gtd-mobile" });
+    const p = this.currentPerspective;
+    const usesSidebar = p === "projects" || p === "someday" || p === "archive" || p === "tags";
+    const inDetail = usesSidebar && p !== "tags" && this.selectedProjectPath !== null || p === "tags" && this.selectedTag !== null;
+    if (usesSidebar && inDetail) {
+      const back = body.createDiv({ cls: "gtd-mobile-back" });
+      back.setText("\u2190 Tilbage til listen");
+      back.onclick = () => {
+        this.selectedProjectPath = null;
+        this.selectedTag = null;
+        void this.render();
+      };
+      const main2 = body.createDiv({ cls: "gtd-main gtd-mobile-main" });
+      await this.renderMain(main2);
+      if ((p === "projects" || p === "someday" || p === "archive") && this.selectedProjectPath !== null) {
+        const file = this.app.vault.getAbstractFileByPath(
+          this.selectedProjectPath
+        );
+        if (file instanceof import_obsidian3.TFile) {
+          const inspector = body.createDiv({
+            cls: "gtd-inspector gtd-mobile-inspector"
+          });
+          await this.renderInspector(inspector, file);
+        }
+      }
+      return;
+    }
+    if (usesSidebar) {
+      const sidebar = body.createDiv({ cls: "gtd-sidebar gtd-mobile-sidebar" });
+      await this.renderSidebar(sidebar);
+      if (p === "someday") {
+        const main2 = body.createDiv({ cls: "gtd-main gtd-mobile-main" });
+        await this.renderSomedayMain(main2);
+      }
+      return;
+    }
+    const main = body.createDiv({ cls: "gtd-main gtd-mobile-main" });
+    await this.renderMain(main);
   }
   /* ============================================================
      TOOLBAR
@@ -732,16 +1001,53 @@ var DashboardView = class extends import_obsidian3.ItemView {
     } else {
       return;
     }
-    if (files.length === 0) {
+    const includeEmptyFolders = this.currentPerspective === "projects";
+    if (files.length === 0 && !includeEmptyFolders) {
       const empty = parent.createDiv({ cls: "gtd-empty" });
       empty.createDiv({ text: "(ingen projekter)", cls: "gtd-empty-text" });
       return;
     }
-    const tree = this.buildTree(files);
+    const tree = this.buildTree(files, includeEmptyFolders);
     const treeEl = parent.createDiv({ cls: "gtd-tree" });
+    if (tree.length === 0) {
+      const empty = treeEl.createDiv({ cls: "gtd-empty" });
+      empty.createDiv({ text: "(ingen projekter)", cls: "gtd-empty-text" });
+    }
     for (const node of tree) {
       this.renderTreeNode(treeEl, node, 0);
     }
+    if (this.currentPerspective === "projects") {
+      const addFolderBtn = parent.createDiv({ cls: "gtd-add-folder-btn" });
+      addFolderBtn.setText("+ Ny mappe");
+      addFolderBtn.onclick = () => void this.createFolder();
+    }
+  }
+  /** Spørg om mappenavn og opret en (tom) undermappe i GTD/Projects/. */
+  async createFolder() {
+    new TextPromptModal(
+      this.app,
+      "\u{1F4C1} Ny mappe",
+      "Mappenavn (fx Hospital, Firma/Faktura)",
+      "",
+      async (raw) => {
+        const sub = raw.trim().replace(/^\/+|\/+$/g, "");
+        if (!sub)
+          return;
+        const cleaned = sub.split("/").map((s) => safeFileName(s)).filter((s) => s.length > 0).join("/");
+        if (!cleaned) {
+          new import_obsidian3.Notice("Ugyldigt mappenavn.");
+          return;
+        }
+        const path = `${PROJECTS_FOLDER}/${cleaned}`;
+        if (this.app.vault.getAbstractFileByPath(path)) {
+          new import_obsidian3.Notice(`Mappen "${cleaned}" findes allerede.`);
+          return;
+        }
+        await ensureFolder(this.app, path);
+        new import_obsidian3.Notice(`\u{1F4C1} Oprettet mappe: ${cleaned}`);
+        void this.render();
+      }
+    ).open();
   }
   renderTreeNode(parent, node, depth) {
     var _a;
@@ -839,6 +1145,10 @@ var DashboardView = class extends import_obsidian3.ItemView {
     }
     if (this.currentPerspective === "tags") {
       await this.renderTagMain(parent);
+      return;
+    }
+    if (this.currentPerspective === "someday" && !this.selectedProjectPath) {
+      await this.renderSomedayMain(parent);
       return;
     }
     if (this.currentPerspective === "projects" || this.currentPerspective === "someday" || this.currentPerspective === "archive") {
@@ -1670,6 +1980,85 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
     }
     this.renderAddTaskInput(parent, file, "+ Tilf\xF8j single task (tekst)\u2026");
   }
+  /* ============================================================
+     SOMEDAY-LISTE
+     ============================================================ */
+  async renderSomedayMain(parent) {
+    const file = await ensureSomedayFile(this.app);
+    const tasks = await this.tasksInFile(file);
+    const open = tasks.filter((t) => !t.done);
+    const header = parent.createDiv({ cls: "gtd-main-header" });
+    header.createEl("h2", {
+      text: "\u{1F4A4} Someday / Maybe",
+      cls: "gtd-main-title"
+    });
+    header.createSpan({
+      text: `${open.length} items`,
+      cls: "gtd-main-stats"
+    });
+    parent.createEl("p", {
+      text: "Lette ting du m\xE5ske vil g\xF8re engang. Klik \u201C\u{1F4C1} Lav til projekt\u201D for at g\xF8re en til et rigtigt projekt. (Parkerede projekter vises i listen til venstre.)",
+      cls: "gtd-empty-text"
+    });
+    if (open.length === 0) {
+      const empty = parent.createDiv({ cls: "gtd-empty" });
+      empty.createDiv({ text: "\u{1F4A4}", cls: "gtd-empty-icon" });
+      empty.createDiv({
+        text: "Ingen someday-items. Tilf\xF8j nedenfor, eller flyt et inbox-item hertil.",
+        cls: "gtd-empty-text"
+      });
+    } else {
+      const list = parent.createEl("ul", { cls: "gtd-task-list" });
+      for (const task of open) {
+        const li = list.createEl("li", { cls: "gtd-task" });
+        const body = li.createDiv({ cls: "gtd-task-body" });
+        const textEl = body.createDiv({
+          text: task.text,
+          cls: "gtd-task-text"
+        });
+        textEl.onclick = () => new TaskEditModal(this.app, task).open();
+        const actions = li.createDiv({ cls: "gtd-someday-actions" });
+        const toProjectBtn = actions.createEl("button", {
+          text: "\u{1F4C1} Lav til projekt",
+          cls: "gtd-action-btn"
+        });
+        toProjectBtn.onclick = (e) => {
+          e.stopPropagation();
+          void this.convertSomedayToProject(task);
+        };
+      }
+    }
+    this.renderAddTaskInput(parent, file, "+ Tilf\xF8j someday-item\u2026");
+  }
+  /** Lav et someday-item om til et aktivt projekt og fjern det fra Someday-listen. */
+  async convertSomedayToProject(task) {
+    const safe = safeFileName(task.text);
+    if (!safe) {
+      new import_obsidian3.Notice("Kan ikke lave projekt af tom tekst.");
+      return;
+    }
+    const path = `${PROJECTS_FOLDER}/${safe}.md`;
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      new import_obsidian3.Notice(`Et projekt "${safe}" findes allerede.`);
+      return;
+    }
+    await ensureFolder(this.app, PROJECTS_FOLDER);
+    await this.app.vault.create(path, projectTemplate(safe));
+    await this.removeLineFromFile(task.file, task.lineNumber);
+    new import_obsidian3.Notice(`\u{1F4C1} "${safe}" er nu et projekt.`);
+    this.currentPerspective = "projects";
+    this.selectedProjectPath = path;
+    void this.render();
+  }
+  /** Fjern en specifik linje fra en fil. */
+  async removeLineFromFile(file, lineNumber) {
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    if (lineNumber < 0 || lineNumber >= lines.length)
+      return;
+    lines.splice(lineNumber, 1);
+    await this.app.vault.modify(file, lines.join("\n"));
+  }
   async renderTagMain(parent) {
     var _a;
     const header = parent.createDiv({ cls: "gtd-main-header" });
@@ -1752,24 +2141,62 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
       this.renderTaskList(
         parent,
         tasks,
-        /*showSource*/
-        false
+        false,
+        /*hierarchical*/
+        true,
+        tasks
       );
     }
     if (this.currentPerspective === "projects") {
       this.renderAddTaskInput(parent, file, "+ Tilf\xF8j task til projektet\u2026");
     }
   }
-  renderTaskList(parent, tasks, showSource) {
+  renderTaskList(parent, tasks, showSource, hierarchical = false, allTasks = tasks) {
     const list = parent.createEl("ul", { cls: "gtd-task-list" });
+    if (!hierarchical) {
+      for (const task of tasks) {
+        this.renderTaskRow(list, task, showSource, false, false);
+      }
+      return;
+    }
+    const collapseStack = [];
     for (const task of tasks) {
-      this.renderTaskRow(list, task, showSource);
+      while (collapseStack.length > 0 && task.indent <= collapseStack[collapseStack.length - 1]) {
+        collapseStack.pop();
+      }
+      if (collapseStack.length > 0)
+        continue;
+      const hasChildren = allTasks.some(
+        (t) => t.parentLine === task.lineNumber
+      );
+      const isCollapsed = hasChildren && this.collapsedTasks.has(this.taskKey(task));
+      this.renderTaskRow(list, task, showSource, hasChildren, isCollapsed);
+      if (isCollapsed)
+        collapseStack.push(task.indent);
     }
   }
-  renderTaskRow(parent, task, showSource) {
+  renderTaskRow(parent, task, showSource, hasChildren = false, isCollapsed = false) {
     const li = parent.createEl("li", { cls: "gtd-task" });
     if (task.done)
       li.addClass("is-done");
+    if (task.indent > 0) {
+      li.style.marginLeft = `${Math.min(task.indent, 24)}px`;
+    }
+    const chevron = li.createSpan({ cls: "gtd-task-chevron" });
+    if (hasChildren) {
+      chevron.setText(isCollapsed ? "\u25B8" : "\u25BE");
+      chevron.addClass("is-toggleable");
+      chevron.onclick = (e) => {
+        e.stopPropagation();
+        const key = this.taskKey(task);
+        if (this.collapsedTasks.has(key))
+          this.collapsedTasks.delete(key);
+        else
+          this.collapsedTasks.add(key);
+        this.saveCollapsedTasks();
+        void this.render();
+      };
+    }
     const cb = li.createEl("input", {
       type: "checkbox",
       cls: "gtd-task-checkbox"
@@ -1781,6 +2208,9 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
     };
     const body = li.createDiv({ cls: "gtd-task-body" });
     const textEl = body.createDiv({ text: task.text, cls: "gtd-task-text" });
+    if (hasChildren && isCollapsed) {
+      textEl.createSpan({ text: " \u2026", cls: "gtd-task-collapsed-hint" });
+    }
     textEl.onclick = () => new TaskEditModal(this.app, task).open();
     const meta = body.createDiv({ cls: "gtd-task-meta" });
     for (const tag of task.tags) {
@@ -1874,6 +2304,25 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
       });
       await this.app.vault.modify(file, updated);
     };
+    const noteField = parent.createDiv({ cls: "gtd-field" });
+    noteField.createEl("label", {
+      text: "Note",
+      cls: "gtd-field-label"
+    });
+    const noteArea = noteField.createEl("textarea", {
+      cls: "gtd-input gtd-note-area",
+      attr: { placeholder: "Skriv lidt info om projektet\u2026", rows: "4" }
+    });
+    const fileContent = await this.app.vault.read(file);
+    noteArea.value = getNoteSection(fileContent);
+    noteArea.addEventListener("blur", async () => {
+      const current = await this.app.vault.read(file);
+      const existing = getNoteSection(current);
+      if (existing === noteArea.value)
+        return;
+      const updated = setNoteSection(current, noteArea.value);
+      await this.app.vault.modify(file, updated);
+    });
     const reviewedField = parent.createDiv({ cls: "gtd-field" });
     const reviewedBtn = reviewedField.createEl("button", {
       text: "\u2713 Marker som reviewed nu",
@@ -1894,8 +2343,9 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
     field.createEl("label", { text: label, cls: "gtd-field-label" });
     const row = field.createDiv({ cls: "gtd-row" });
     const input = row.createEl("input", {
-      type: "date",
-      cls: "gtd-input"
+      type: "text",
+      cls: "gtd-input",
+      attr: { placeholder: "+1d \xB7 11/02/2026 \xB7 tom = ingen" }
     });
     const current = getFrontmatterString(this.app, file, key);
     if (current)
@@ -1905,7 +2355,32 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
       const updated = setFrontmatterFields(content, { [key]: value });
       await this.app.vault.modify(file, updated);
     };
-    input.onchange = () => void save(input.value);
+    const apply = () => {
+      const raw = input.value.trim();
+      if (raw === "") {
+        void save("");
+        return;
+      }
+      if (raw === current)
+        return;
+      const parsed = parseDateExpression(raw);
+      if (!parsed) {
+        new import_obsidian3.Notice(
+          `Forstod ikke "${raw}". Brug fx +1d, +2m, 11/02/2026 eller 2026-02-11.`
+        );
+        return;
+      }
+      input.value = parsed;
+      void save(parsed);
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        apply();
+        input.blur();
+      }
+    });
+    input.addEventListener("blur", () => apply());
     const clearBtn = row.createEl("button", {
       text: "\xD7",
       cls: "gtd-clear-btn"
@@ -1915,34 +2390,6 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
       input.value = "";
       void save("");
     };
-    const quickRow = field.createDiv({ cls: "gtd-quick-dates" });
-    const shortcuts = [
-      { label: "+1d", addDays: 1 },
-      { label: "+5d", addDays: 5 },
-      { label: "+1u", addDays: 7 },
-      { label: "+1m", addMonths: 1 }
-    ];
-    for (const sc of shortcuts) {
-      const btn = quickRow.createEl("button", {
-        text: sc.label,
-        cls: "gtd-quick-btn"
-      });
-      btn.onclick = () => {
-        const base = input.value ? /* @__PURE__ */ new Date(input.value + "T00:00:00") : /* @__PURE__ */ new Date();
-        if (sc.addDays !== void 0) {
-          base.setDate(base.getDate() + sc.addDays);
-        }
-        if (sc.addMonths !== void 0) {
-          base.setMonth(base.getMonth() + sc.addMonths);
-        }
-        const yyyy = base.getFullYear();
-        const mm = String(base.getMonth() + 1).padStart(2, "0");
-        const dd = String(base.getDate()).padStart(2, "0");
-        const newValue = `${yyyy}-${mm}-${dd}`;
-        input.value = newValue;
-        void save(newValue);
-      };
-    }
   }
   /* ============================================================
      DATA HELPERS
@@ -1963,7 +2410,7 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
     return result;
   }
   /** Byg mappe/projekt-træ ud fra fil-paths. */
-  buildTree(files) {
+  buildTree(files, includeEmptyFolders = false) {
     var _a, _b, _c, _d, _e;
     const root = {
       kind: "folder",
@@ -1971,6 +2418,21 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
       path: "",
       children: []
     };
+    if (includeEmptyFolders) {
+      const projectsFolder = this.app.vault.getAbstractFileByPath(PROJECTS_FOLDER);
+      if (projectsFolder instanceof import_obsidian3.TFolder) {
+        const addFolders = (folder, prefix) => {
+          for (const child of folder.children) {
+            if (child instanceof import_obsidian3.TFolder) {
+              const rel = prefix ? `${prefix}/${child.name}` : child.name;
+              this.ensureFolderNode(root, rel.split("/"));
+              addFolders(child, rel);
+            }
+          }
+        };
+        addFolders(projectsFolder, "");
+      }
+    }
     for (const file of files) {
       let relativePath;
       let isUnderProjects = false;
@@ -2016,6 +2478,29 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
     }
     this.sortTree(root);
     return (_e = root.children) != null ? _e : [];
+  }
+  /** Sørg for at en mappe-sti findes i træet; returnér den dybeste folder-node. */
+  ensureFolderNode(root, parts) {
+    var _a, _b;
+    let current = root;
+    for (let i = 0; i < parts.length; i++) {
+      const folderName = parts[i];
+      const folderPath = parts.slice(0, i + 1).join("/");
+      let folder = (_a = current.children) == null ? void 0 : _a.find(
+        (c) => c.kind === "folder" && c.name === folderName
+      );
+      if (!folder) {
+        folder = {
+          kind: "folder",
+          name: folderName,
+          path: folderPath,
+          children: []
+        };
+        (_b = current.children) == null ? void 0 : _b.push(folder);
+      }
+      current = folder;
+    }
+    return current;
   }
   sortTree(node) {
     if (!node.children)
@@ -2291,6 +2776,59 @@ var SingleTaskModal = class extends import_obsidian3.Modal {
     };
     this.close();
     await this.onSubmit(data);
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var TextPromptModal = class extends import_obsidian3.Modal {
+  constructor(app, title, placeholder, initial, onSubmit) {
+    super(app);
+    this.title = title;
+    this.placeholder = placeholder;
+    this.initial = initial;
+    this.onSubmit = onSubmit;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: this.title });
+    this.inputEl = contentEl.createEl("input", {
+      type: "text",
+      attr: { placeholder: this.placeholder }
+    });
+    this.inputEl.value = this.initial;
+    this.inputEl.style.width = "100%";
+    this.inputEl.style.padding = "8px";
+    this.inputEl.style.marginTop = "8px";
+    this.inputEl.style.fontSize = "14px";
+    this.inputEl.focus();
+    const buttonRow = contentEl.createDiv();
+    buttonRow.style.marginTop = "14px";
+    buttonRow.style.display = "flex";
+    buttonRow.style.gap = "8px";
+    buttonRow.style.justifyContent = "flex-end";
+    const cancelBtn = buttonRow.createEl("button", { text: "Annull\xE9r" });
+    cancelBtn.onclick = () => this.close();
+    const okBtn = buttonRow.createEl("button", {
+      text: "OK (\u21B5)",
+      cls: "mod-cta"
+    });
+    okBtn.onclick = () => void this.submit();
+    this.inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void this.submit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.close();
+      }
+    });
+  }
+  async submit() {
+    const value = this.inputEl.value;
+    this.close();
+    await this.onSubmit(value);
   }
   onClose() {
     this.contentEl.empty();

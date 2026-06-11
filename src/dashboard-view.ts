@@ -3,7 +3,9 @@ import {
   ItemView,
   Modal,
   Notice,
+  Platform,
   TFile,
+  TFolder,
   WorkspaceLeaf,
   debounce,
 } from "obsidian";
@@ -23,14 +25,21 @@ import {
   SINGLE_TASKS_PATH,
   SOMEDAY_LOG,
   appendSingleTask,
+  appendSomedayItem,
   appendToLog,
   currentYear,
   ensureFolder,
   ensureSingleTasksFile,
+  ensureSomedayFile,
   getFrontmatterString,
   getGtdStatus,
+  getNoteSection,
   isProjectFileEmpty,
+  parseDateExpression,
+  projectTemplate,
+  safeFileName,
   setFrontmatterFields,
+  setNoteSection,
   todayISO,
 } from "./project-utils";
 import { CalendarService, ParsedEvent } from "./calendar-service";
@@ -92,6 +101,7 @@ export class DashboardView extends ItemView {
   private selectedProjectPath: string | null = null;
   private selectedTag: string | null = null;
   private collapsedFolders = new Set<string>();
+  private collapsedTasks = new Set<string>();
 
   private readonly debouncedRender = debounce(
     () => void this.render(),
@@ -102,6 +112,38 @@ export class DashboardView extends ItemView {
   constructor(leaf: WorkspaceLeaf, callbacks: DashboardCallbacks) {
     super(leaf);
     this.callbacks = callbacks;
+    this.loadCollapsedTasks();
+  }
+
+  private loadCollapsedTasks(): void {
+    try {
+      const raw = window.localStorage.getItem("joner-gtd:collapsed-tasks");
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          this.collapsedTasks = new Set(
+            arr.filter((x) => typeof x === "string")
+          );
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private saveCollapsedTasks(): void {
+    try {
+      window.localStorage.setItem(
+        "joner-gtd:collapsed-tasks",
+        JSON.stringify(Array.from(this.collapsedTasks))
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  private taskKey(task: Task): string {
+    return `${task.file.path}::${task.text}`;
   }
 
   getViewType(): string {
@@ -166,6 +208,11 @@ export class DashboardView extends ItemView {
     const toolbar = root.createDiv({ cls: "gtd-toolbar" });
     await this.renderToolbar(toolbar);
 
+    if (Platform.isPhone) {
+      await this.renderMobileBody(root);
+      return;
+    }
+
     const body = root.createDiv({ cls: "gtd-body" });
 
     const showSidebar =
@@ -204,6 +251,70 @@ export class DashboardView extends ItemView {
         await this.renderInspector(inspector, file);
       }
     }
+  }
+
+  /* ============================================================
+     MOBIL-LAYOUT — én kolonne ad gangen (iPhone)
+     ============================================================ */
+
+  private async renderMobileBody(root: HTMLElement): Promise<void> {
+    const body = root.createDiv({ cls: "gtd-body gtd-mobile" });
+
+    const p = this.currentPerspective;
+    const usesSidebar =
+      p === "projects" || p === "someday" || p === "archive" || p === "tags";
+
+    // DETAIL-mode: et projekt (eller tag) er valgt → vis tilbage-knap + indhold
+    const inDetail =
+      (usesSidebar && p !== "tags" && this.selectedProjectPath !== null) ||
+      (p === "tags" && this.selectedTag !== null);
+
+    if (usesSidebar && inDetail) {
+      // Tilbage-knap
+      const back = body.createDiv({ cls: "gtd-mobile-back" });
+      back.setText("← Tilbage til listen");
+      back.onclick = () => {
+        this.selectedProjectPath = null;
+        this.selectedTag = null;
+        void this.render();
+      };
+
+      const main = body.createDiv({ cls: "gtd-main gtd-mobile-main" });
+      await this.renderMain(main);
+
+      // Inspector stakket under (kun projekt-perspektiver)
+      if (
+        (p === "projects" || p === "someday" || p === "archive") &&
+        this.selectedProjectPath !== null
+      ) {
+        const file = this.app.vault.getAbstractFileByPath(
+          this.selectedProjectPath
+        );
+        if (file instanceof TFile) {
+          const inspector = body.createDiv({
+            cls: "gtd-inspector gtd-mobile-inspector",
+          });
+          await this.renderInspector(inspector, file);
+        }
+      }
+      return;
+    }
+
+    if (usesSidebar) {
+      // LIST-mode: vis listen fuld bredde
+      const sidebar = body.createDiv({ cls: "gtd-sidebar gtd-mobile-sidebar" });
+      await this.renderSidebar(sidebar);
+      // Someday: vis også den lette liste under de parkerede projekter
+      if (p === "someday") {
+        const main = body.createDiv({ cls: "gtd-main gtd-mobile-main" });
+        await this.renderSomedayMain(main);
+      }
+      return;
+    }
+
+    // Perspektiver uden sidebar (inbox/naeste/forecast/review/defer/singles)
+    const main = body.createDiv({ cls: "gtd-main gtd-mobile-main" });
+    await this.renderMain(main);
   }
 
   /* ============================================================
@@ -330,17 +441,63 @@ export class DashboardView extends ItemView {
       return;
     }
 
-    if (files.length === 0) {
+    // For projekter: medtag også tomme mapper (så man kan oprette dem på forhånd)
+    const includeEmptyFolders = this.currentPerspective === "projects";
+
+    if (files.length === 0 && !includeEmptyFolders) {
       const empty = parent.createDiv({ cls: "gtd-empty" });
       empty.createDiv({ text: "(ingen projekter)", cls: "gtd-empty-text" });
       return;
     }
 
-    const tree = this.buildTree(files);
+    const tree = this.buildTree(files, includeEmptyFolders);
     const treeEl = parent.createDiv({ cls: "gtd-tree" });
+    if (tree.length === 0) {
+      const empty = treeEl.createDiv({ cls: "gtd-empty" });
+      empty.createDiv({ text: "(ingen projekter)", cls: "gtd-empty-text" });
+    }
     for (const node of tree) {
       this.renderTreeNode(treeEl, node, 0);
     }
+
+    // "+ Ny mappe"-knap (kun projekter)
+    if (this.currentPerspective === "projects") {
+      const addFolderBtn = parent.createDiv({ cls: "gtd-add-folder-btn" });
+      addFolderBtn.setText("+ Ny mappe");
+      addFolderBtn.onclick = () => void this.createFolder();
+    }
+  }
+
+  /** Spørg om mappenavn og opret en (tom) undermappe i GTD/Projects/. */
+  private async createFolder(): Promise<void> {
+    new TextPromptModal(
+      this.app,
+      "📁 Ny mappe",
+      "Mappenavn (fx Hospital, Firma/Faktura)",
+      "",
+      async (raw) => {
+        const sub = raw.trim().replace(/^\/+|\/+$/g, "");
+        if (!sub) return;
+        // Tillad nestede mapper men rens hvert led
+        const cleaned = sub
+          .split("/")
+          .map((s) => safeFileName(s))
+          .filter((s) => s.length > 0)
+          .join("/");
+        if (!cleaned) {
+          new Notice("Ugyldigt mappenavn.");
+          return;
+        }
+        const path = `${PROJECTS_FOLDER}/${cleaned}`;
+        if (this.app.vault.getAbstractFileByPath(path)) {
+          new Notice(`Mappen "${cleaned}" findes allerede.`);
+          return;
+        }
+        await ensureFolder(this.app, path);
+        new Notice(`📁 Oprettet mappe: ${cleaned}`);
+        void this.render();
+      }
+    ).open();
   }
 
   private renderTreeNode(
@@ -460,6 +617,12 @@ export class DashboardView extends ItemView {
     }
     if (this.currentPerspective === "tags") {
       await this.renderTagMain(parent);
+      return;
+    }
+    // Someday: hvis et parkeret projekt er valgt i sidebaren → vis det.
+    // Ellers vis den lette Someday-liste.
+    if (this.currentPerspective === "someday" && !this.selectedProjectPath) {
+      await this.renderSomedayMain(parent);
       return;
     }
     if (
@@ -1399,6 +1562,101 @@ export class DashboardView extends ItemView {
     this.renderAddTaskInput(parent, file, "+ Tilføj single task (tekst)…");
   }
 
+  /* ============================================================
+     SOMEDAY-LISTE
+     ============================================================ */
+
+  private async renderSomedayMain(parent: HTMLElement): Promise<void> {
+    const file = await ensureSomedayFile(this.app);
+    const tasks = await this.tasksInFile(file);
+    const open = tasks.filter((t) => !t.done);
+
+    const header = parent.createDiv({ cls: "gtd-main-header" });
+    header.createEl("h2", {
+      text: "💤 Someday / Maybe",
+      cls: "gtd-main-title",
+    });
+    header.createSpan({
+      text: `${open.length} items`,
+      cls: "gtd-main-stats",
+    });
+
+    parent.createEl("p", {
+      text:
+        "Lette ting du måske vil gøre engang. Klik “📁 Lav til projekt” for at gøre en til et rigtigt projekt. (Parkerede projekter vises i listen til venstre.)",
+      cls: "gtd-empty-text",
+    });
+
+    if (open.length === 0) {
+      const empty = parent.createDiv({ cls: "gtd-empty" });
+      empty.createDiv({ text: "💤", cls: "gtd-empty-icon" });
+      empty.createDiv({
+        text: "Ingen someday-items. Tilføj nedenfor, eller flyt et inbox-item hertil.",
+        cls: "gtd-empty-text",
+      });
+    } else {
+      const list = parent.createEl("ul", { cls: "gtd-task-list" });
+      for (const task of open) {
+        const li = list.createEl("li", { cls: "gtd-task" });
+
+        const body = li.createDiv({ cls: "gtd-task-body" });
+        const textEl = body.createDiv({
+          text: task.text,
+          cls: "gtd-task-text",
+        });
+        textEl.onclick = () => new TaskEditModal(this.app, task).open();
+
+        const actions = li.createDiv({ cls: "gtd-someday-actions" });
+        const toProjectBtn = actions.createEl("button", {
+          text: "📁 Lav til projekt",
+          cls: "gtd-action-btn",
+        });
+        toProjectBtn.onclick = (e) => {
+          e.stopPropagation();
+          void this.convertSomedayToProject(task);
+        };
+      }
+    }
+
+    this.renderAddTaskInput(parent, file, "+ Tilføj someday-item…");
+  }
+
+  /** Lav et someday-item om til et aktivt projekt og fjern det fra Someday-listen. */
+  private async convertSomedayToProject(task: Task): Promise<void> {
+    const safe = safeFileName(task.text);
+    if (!safe) {
+      new Notice("Kan ikke lave projekt af tom tekst.");
+      return;
+    }
+    const path = `${PROJECTS_FOLDER}/${safe}.md`;
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      new Notice(`Et projekt "${safe}" findes allerede.`);
+      return;
+    }
+    // Opret projektfil
+    await ensureFolder(this.app, PROJECTS_FOLDER);
+    await this.app.vault.create(path, projectTemplate(safe));
+    // Fjern linjen fra Someday.md
+    await this.removeLineFromFile(task.file, task.lineNumber);
+    new Notice(`📁 "${safe}" er nu et projekt.`);
+    // Hop til det nye projekt
+    this.currentPerspective = "projects";
+    this.selectedProjectPath = path;
+    void this.render();
+  }
+
+  /** Fjern en specifik linje fra en fil. */
+  private async removeLineFromFile(
+    file: TFile,
+    lineNumber: number
+  ): Promise<void> {
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    if (lineNumber < 0 || lineNumber >= lines.length) return;
+    lines.splice(lineNumber, 1);
+    await this.app.vault.modify(file, lines.join("\n"));
+  }
+
   private async renderTagMain(parent: HTMLElement): Promise<void> {
     const header = parent.createDiv({ cls: "gtd-main-header" });
 
@@ -1481,7 +1739,8 @@ export class DashboardView extends ItemView {
       cls: "gtd-main-stats",
     });
 
-    // Vis BÅDE åbne og lukkede; klikbart for at slå om
+    // Vis BÅDE åbne og lukkede; klikbart for at slå om.
+    // Hierarkisk visning (fold ud/ind) i projekt-visning.
     if (tasks.length === 0) {
       const empty = parent.createDiv({ cls: "gtd-empty" });
       empty.createDiv({
@@ -1489,7 +1748,7 @@ export class DashboardView extends ItemView {
         cls: "gtd-empty-text",
       });
     } else {
-      this.renderTaskList(parent, tasks, /*showSource*/ false);
+      this.renderTaskList(parent, tasks, false, /*hierarchical*/ true, tasks);
     }
 
     // Inline add-task — kun for aktive projekter
@@ -1501,21 +1760,70 @@ export class DashboardView extends ItemView {
   private renderTaskList(
     parent: HTMLElement,
     tasks: Task[],
-    showSource: boolean
+    showSource: boolean,
+    hierarchical: boolean = false,
+    allTasks: Task[] = tasks
   ): void {
     const list = parent.createEl("ul", { cls: "gtd-task-list" });
+
+    if (!hierarchical) {
+      for (const task of tasks) {
+        this.renderTaskRow(list, task, showSource, false, false);
+      }
+      return;
+    }
+
+    // Hierarkisk: skjul efterkommere af foldede parents.
+    // collapseStack = indents på foldede forfædre vi er "inde i".
+    const collapseStack: number[] = [];
     for (const task of tasks) {
-      this.renderTaskRow(list, task, showSource);
+      while (
+        collapseStack.length > 0 &&
+        task.indent <= collapseStack[collapseStack.length - 1]
+      ) {
+        collapseStack.pop();
+      }
+      if (collapseStack.length > 0) continue; // skjult under en foldet parent
+
+      const hasChildren = allTasks.some(
+        (t) => t.parentLine === task.lineNumber
+      );
+      const isCollapsed =
+        hasChildren && this.collapsedTasks.has(this.taskKey(task));
+
+      this.renderTaskRow(list, task, showSource, hasChildren, isCollapsed);
+
+      if (isCollapsed) collapseStack.push(task.indent);
     }
   }
 
   private renderTaskRow(
     parent: HTMLElement,
     task: Task,
-    showSource: boolean
+    showSource: boolean,
+    hasChildren: boolean = false,
+    isCollapsed: boolean = false
   ): void {
     const li = parent.createEl("li", { cls: "gtd-task" });
     if (task.done) li.addClass("is-done");
+    if (task.indent > 0) {
+      li.style.marginLeft = `${Math.min(task.indent, 24)}px`;
+    }
+
+    // Fold-ud/ind-trekant (kun hvis tasken har sub-tasks)
+    const chevron = li.createSpan({ cls: "gtd-task-chevron" });
+    if (hasChildren) {
+      chevron.setText(isCollapsed ? "▸" : "▾");
+      chevron.addClass("is-toggleable");
+      chevron.onclick = (e) => {
+        e.stopPropagation();
+        const key = this.taskKey(task);
+        if (this.collapsedTasks.has(key)) this.collapsedTasks.delete(key);
+        else this.collapsedTasks.add(key);
+        this.saveCollapsedTasks();
+        void this.render();
+      };
+    }
 
     const cb = li.createEl("input", {
       type: "checkbox",
@@ -1529,6 +1837,9 @@ export class DashboardView extends ItemView {
 
     const body = li.createDiv({ cls: "gtd-task-body" });
     const textEl = body.createDiv({ text: task.text, cls: "gtd-task-text" });
+    if (hasChildren && isCollapsed) {
+      textEl.createSpan({ text: " …", cls: "gtd-task-collapsed-hint" });
+    }
     textEl.onclick = () => new TaskEditModal(this.app, task).open();
 
     const meta = body.createDiv({ cls: "gtd-task-meta" });
@@ -1638,6 +1949,27 @@ export class DashboardView extends ItemView {
       await this.app.vault.modify(file, updated);
     };
 
+    // NOTE
+    const noteField = parent.createDiv({ cls: "gtd-field" });
+    noteField.createEl("label", {
+      text: "Note",
+      cls: "gtd-field-label",
+    });
+    const noteArea = noteField.createEl("textarea", {
+      cls: "gtd-input gtd-note-area",
+      attr: { placeholder: "Skriv lidt info om projektet…", rows: "4" },
+    }) as HTMLTextAreaElement;
+    const fileContent = await this.app.vault.read(file);
+    noteArea.value = getNoteSection(fileContent);
+    // Gem på blur (når man klikker væk) — undgår at skrive ved hvert tastetryk
+    noteArea.addEventListener("blur", async () => {
+      const current = await this.app.vault.read(file);
+      const existing = getNoteSection(current);
+      if (existing === noteArea.value) return;
+      const updated = setNoteSection(current, noteArea.value);
+      await this.app.vault.modify(file, updated);
+    });
+
     // MARK REVIEWED NOW
     const reviewedField = parent.createDiv({ cls: "gtd-field" });
     const reviewedBtn = reviewedField.createEl("button", {
@@ -1667,9 +1999,11 @@ export class DashboardView extends ItemView {
     field.createEl("label", { text: label, cls: "gtd-field-label" });
 
     const row = field.createDiv({ cls: "gtd-row" });
+    // Ét tekstfelt der forstår både "+1d", "11/02/2026" og "2026-02-11"
     const input = row.createEl("input", {
-      type: "date",
+      type: "text",
       cls: "gtd-input",
+      attr: { placeholder: "+1d · 11/02/2026 · tom = ingen" },
     }) as HTMLInputElement;
     const current = getFrontmatterString(this.app, file, key);
     if (current) input.value = current;
@@ -1680,7 +2014,33 @@ export class DashboardView extends ItemView {
       await this.app.vault.modify(file, updated);
     };
 
-    input.onchange = () => void save(input.value);
+    const apply = (): void => {
+      const raw = input.value.trim();
+      if (raw === "") {
+        void save("");
+        return;
+      }
+      // Allerede ISO og uændret? Spring over (undgå unødig skrivning)
+      if (raw === current) return;
+      const parsed = parseDateExpression(raw);
+      if (!parsed) {
+        new Notice(
+          `Forstod ikke "${raw}". Brug fx +1d, +2m, 11/02/2026 eller 2026-02-11.`
+        );
+        return;
+      }
+      input.value = parsed;
+      void save(parsed);
+    };
+
+    input.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        apply();
+        input.blur();
+      }
+    });
+    input.addEventListener("blur", () => apply());
 
     const clearBtn = row.createEl("button", {
       text: "×",
@@ -1691,39 +2051,6 @@ export class DashboardView extends ItemView {
       input.value = "";
       void save("");
     };
-
-    // Quick-add buttons: +1d / +5d / +1w / +1m
-    const quickRow = field.createDiv({ cls: "gtd-quick-dates" });
-    const shortcuts: { label: string; addDays?: number; addMonths?: number }[] =
-      [
-        { label: "+1d", addDays: 1 },
-        { label: "+5d", addDays: 5 },
-        { label: "+1u", addDays: 7 },
-        { label: "+1m", addMonths: 1 },
-      ];
-    for (const sc of shortcuts) {
-      const btn = quickRow.createEl("button", {
-        text: sc.label,
-        cls: "gtd-quick-btn",
-      });
-      btn.onclick = () => {
-        const base = input.value
-          ? new Date(input.value + "T00:00:00")
-          : new Date();
-        if (sc.addDays !== undefined) {
-          base.setDate(base.getDate() + sc.addDays);
-        }
-        if (sc.addMonths !== undefined) {
-          base.setMonth(base.getMonth() + sc.addMonths);
-        }
-        const yyyy = base.getFullYear();
-        const mm = String(base.getMonth() + 1).padStart(2, "0");
-        const dd = String(base.getDate()).padStart(2, "0");
-        const newValue = `${yyyy}-${mm}-${dd}`;
-        input.value = newValue;
-        void save(newValue);
-      };
-    }
   }
 
   /* ============================================================
@@ -1754,13 +2081,34 @@ export class DashboardView extends ItemView {
   }
 
   /** Byg mappe/projekt-træ ud fra fil-paths. */
-  private buildTree(files: TFile[]): TreeNode[] {
+  private buildTree(
+    files: TFile[],
+    includeEmptyFolders: boolean = false
+  ): TreeNode[] {
     const root: TreeNode = {
       kind: "folder",
       name: "",
       path: "",
       children: [],
     };
+
+    // Medtag tomme undermapper i GTD/Projects/ (så de vises selvom de ingen projekter har)
+    if (includeEmptyFolders) {
+      const projectsFolder =
+        this.app.vault.getAbstractFileByPath(PROJECTS_FOLDER);
+      if (projectsFolder instanceof TFolder) {
+        const addFolders = (folder: TFolder, prefix: string) => {
+          for (const child of folder.children) {
+            if (child instanceof TFolder) {
+              const rel = prefix ? `${prefix}/${child.name}` : child.name;
+              this.ensureFolderNode(root, rel.split("/"));
+              addFolders(child, rel);
+            }
+          }
+        };
+        addFolders(projectsFolder, "");
+      }
+    }
 
     for (const file of files) {
       let relativePath: string;
@@ -1813,6 +2161,29 @@ export class DashboardView extends ItemView {
 
     this.sortTree(root);
     return root.children ?? [];
+  }
+
+  /** Sørg for at en mappe-sti findes i træet; returnér den dybeste folder-node. */
+  private ensureFolderNode(root: TreeNode, parts: string[]): TreeNode {
+    let current = root;
+    for (let i = 0; i < parts.length; i++) {
+      const folderName = parts[i];
+      const folderPath = parts.slice(0, i + 1).join("/");
+      let folder = current.children?.find(
+        (c) => c.kind === "folder" && c.name === folderName
+      );
+      if (!folder) {
+        folder = {
+          kind: "folder",
+          name: folderName,
+          path: folderPath,
+          children: [],
+        };
+        current.children?.push(folder);
+      }
+      current = folder;
+    }
+    return current;
   }
 
   private sortTree(node: TreeNode): void {
@@ -2165,6 +2536,81 @@ class SingleTaskModal extends Modal {
 
     this.close();
     await this.onSubmit(data);
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/** Simpel én-felt tekst-prompt modal. */
+class TextPromptModal extends Modal {
+  private readonly title: string;
+  private readonly placeholder: string;
+  private readonly initial: string;
+  private readonly onSubmit: (value: string) => void | Promise<void>;
+  private inputEl!: HTMLInputElement;
+
+  constructor(
+    app: App,
+    title: string,
+    placeholder: string,
+    initial: string,
+    onSubmit: (value: string) => void | Promise<void>
+  ) {
+    super(app);
+    this.title = title;
+    this.placeholder = placeholder;
+    this.initial = initial;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: this.title });
+
+    this.inputEl = contentEl.createEl("input", {
+      type: "text",
+      attr: { placeholder: this.placeholder },
+    });
+    this.inputEl.value = this.initial;
+    this.inputEl.style.width = "100%";
+    this.inputEl.style.padding = "8px";
+    this.inputEl.style.marginTop = "8px";
+    this.inputEl.style.fontSize = "14px";
+    this.inputEl.focus();
+
+    const buttonRow = contentEl.createDiv();
+    buttonRow.style.marginTop = "14px";
+    buttonRow.style.display = "flex";
+    buttonRow.style.gap = "8px";
+    buttonRow.style.justifyContent = "flex-end";
+
+    const cancelBtn = buttonRow.createEl("button", { text: "Annullér" });
+    cancelBtn.onclick = () => this.close();
+
+    const okBtn = buttonRow.createEl("button", {
+      text: "OK (↵)",
+      cls: "mod-cta",
+    });
+    okBtn.onclick = () => void this.submit();
+
+    this.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void this.submit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.close();
+      }
+    });
+  }
+
+  private async submit(): Promise<void> {
+    const value = this.inputEl.value;
+    this.close();
+    await this.onSubmit(value);
   }
 
   onClose(): void {

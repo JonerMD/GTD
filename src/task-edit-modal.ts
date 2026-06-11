@@ -1,6 +1,12 @@
 import { App, Modal, Notice, TFile } from "obsidian";
 import { Task } from "./task";
-import { INBOX_PATH, SINGLE_TASKS_PATH, todayISO } from "./project-utils";
+import {
+  INBOX_PATH,
+  SINGLE_TASKS_PATH,
+  appendSomedayItem,
+  parseDateExpression,
+  todayISO,
+} from "./project-utils";
 
 /** Modal til at redigere en eksisterende task: tekst, tags, due, defer, done-status. */
 export class TaskEditModal extends Modal {
@@ -76,6 +82,21 @@ export class TaskEditModal extends Modal {
     this.doneEl.checked = this.task.done;
     doneWrap.createEl("label", { text: "Afsluttet" });
 
+    // HIERARKI (ryk ind / ud — gør tasken til sub-task af den ovenover)
+    const hierWrap = contentEl.createDiv();
+    hierWrap.style.marginTop = "12px";
+    hierWrap.style.display = "flex";
+    hierWrap.style.alignItems = "center";
+    hierWrap.style.gap = "8px";
+    hierWrap.createEl("span", {
+      text: "Hierarki:",
+      cls: "setting-item-name",
+    });
+    const outdentBtn = hierWrap.createEl("button", { text: "⇤ Ryk ud" });
+    outdentBtn.onclick = () => void this.changeIndent(-1);
+    const indentBtn = hierWrap.createEl("button", { text: "⇥ Ryk ind" });
+    indentBtn.onclick = () => void this.changeIndent(1);
+
     // KNAPPER
     const buttonRow = contentEl.createDiv();
     buttonRow.style.marginTop = "18px";
@@ -96,6 +117,11 @@ export class TaskEditModal extends Modal {
       await leaf.openFile(this.task.file, {
         eState: { line: this.task.lineNumber },
       });
+    };
+
+    const somedayBtn = leftBtns.createEl("button", { text: "💤 Til Someday" });
+    somedayBtn.onclick = async () => {
+      await this.moveToSomeday();
     };
 
     const deleteBtn = leftBtns.createEl("button", { text: "🗑 Slet" });
@@ -153,13 +179,37 @@ export class TaskEditModal extends Modal {
     row.style.display = "flex";
     row.style.gap = "8px";
     row.style.marginTop = "4px";
-    row.style.marginBottom = "4px";
+    row.style.marginBottom = "10px";
 
-    const input = row.createEl("input", { type: "date" });
+    // Ét tekstfelt: forstår både "+1d", "11/02/2026" og "2026-02-11"
+    const input = row.createEl("input", {
+      type: "text",
+      attr: { placeholder: "+1d · 11/02/2026 · tom = ingen" },
+    });
     input.value = initialValue;
     input.style.flex = "1";
     input.style.padding = "6px 8px";
     input.style.fontSize = "13px";
+
+    const apply = () => {
+      const raw = input.value.trim();
+      if (raw === "") return;
+      const parsed = parseDateExpression(raw);
+      if (!parsed) {
+        new Notice(
+          `Forstod ikke "${raw}". Brug fx +1d, +2m, 11/02/2026 eller 2026-02-11.`
+        );
+        return;
+      }
+      input.value = parsed;
+    };
+    input.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        apply();
+      }
+    });
+    input.addEventListener("blur", () => apply());
 
     const clearBtn = row.createEl("button", { text: "×" });
     clearBtn.style.padding = "4px 10px";
@@ -167,36 +217,6 @@ export class TaskEditModal extends Modal {
       input.value = "";
     };
 
-    // Quick-add row
-    const quickRow = parent.createDiv();
-    quickRow.style.display = "flex";
-    quickRow.style.gap = "4px";
-    quickRow.style.marginBottom = "10px";
-
-    const shortcuts: { label: string; addDays?: number; addMonths?: number }[] =
-      [
-        { label: "+1d", addDays: 1 },
-        { label: "+5d", addDays: 5 },
-        { label: "+1u", addDays: 7 },
-        { label: "+1m", addMonths: 1 },
-      ];
-    for (const sc of shortcuts) {
-      const btn = quickRow.createEl("button", { text: sc.label });
-      btn.style.padding = "3px 8px";
-      btn.style.fontSize = "11px";
-      btn.onclick = () => {
-        const base = input.value
-          ? new Date(input.value + "T00:00:00")
-          : new Date();
-        if (sc.addDays !== undefined) base.setDate(base.getDate() + sc.addDays);
-        if (sc.addMonths !== undefined)
-          base.setMonth(base.getMonth() + sc.addMonths);
-        const y = base.getFullYear();
-        const m = String(base.getMonth() + 1).padStart(2, "0");
-        const d = String(base.getDate()).padStart(2, "0");
-        input.value = `${y}-${m}-${d}`;
-      };
-    }
     return input;
   }
 
@@ -219,12 +239,21 @@ export class TaskEditModal extends Modal {
       .map((t) => t.replace(/^#/, ""))
       .filter((t) => t.length > 0);
 
+    // Normalisér dato-felterne (i tilfælde af at et udtryk ikke er blevet anvendt endnu)
+    const normalizeDate = (raw: string): string => {
+      const v = raw.trim();
+      if (!v) return "";
+      return parseDateExpression(v) ?? "";
+    };
+    const dueVal = normalizeDate(this.dueEl.value);
+    const deferVal = normalizeDate(this.deferEl.value);
+
     const parts: string[] = [`${leadingWs}- ${checkmark}`, text];
     if (newTags.length > 0) {
       parts.push(newTags.map((t) => `#${t}`).join(" "));
     }
-    if (this.dueEl.value) parts.push(`📅 ${this.dueEl.value}`);
-    if (this.deferEl.value) parts.push(`⏳ ${this.deferEl.value}`);
+    if (dueVal) parts.push(`📅 ${dueVal}`);
+    if (deferVal) parts.push(`⏳ ${deferVal}`);
     if (this.task.createdDate) parts.push(`➕ ${this.task.createdDate}`);
     if (newDone) {
       // Hvis task lige er afsluttet, tilføj ✅ i dag.
@@ -272,6 +301,78 @@ export class TaskEditModal extends Modal {
     } catch (err) {
       console.error("Joner GTD: fejl ved task-sletning", err);
       new Notice("Kunne ikke slette. Tjek konsollen.");
+    }
+  }
+
+  /** Ryk tasken (med dens sub-tasks) ind/ud i hierarkiet. */
+  private async changeIndent(delta: 1 | -1): Promise<void> {
+    try {
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+      const start = this.task.lineNumber;
+      if (start >= lines.length) return;
+
+      const indentOf = (l: string): number => {
+        let n = 0;
+        for (const c of l) {
+          if (c === " ") n++;
+          else if (c === "\t") n += 4;
+          else break;
+        }
+        return n;
+      };
+
+      const baseIndent = indentOf(lines[start]);
+      // Blok = task-linjen + efterfølgende mere-indrykkede linjer
+      let end = start + 1;
+      while (end < lines.length) {
+        const l = lines[end];
+        if (l.trim() === "") break;
+        if (indentOf(l) > baseIndent) end++;
+        else break;
+      }
+
+      if (delta === 1) {
+        // Ryk ind: tilføj en tab til hele blokken
+        for (let i = start; i < end; i++) lines[i] = "\t" + lines[i];
+      } else {
+        if (baseIndent === 0) {
+          new Notice("Tasken er allerede yderst.");
+          return;
+        }
+        // Ryk ud: fjern ét niveau (en tab eller op til 4 mellemrum) fra hver linje
+        for (let i = start; i < end; i++) {
+          lines[i] = lines[i].replace(/^(\t| {1,4})/, "");
+        }
+      }
+
+      await this.app.vault.modify(this.task.file, lines.join("\n"));
+      new Notice(delta === 1 ? "⇥ Rykket ind" : "⇤ Rykket ud");
+      this.close();
+    } catch (err) {
+      console.error("Joner GTD: fejl ved indrykning", err);
+      new Notice("Kunne ikke ændre hierarki.");
+    }
+  }
+
+  /** Flyt tasken til Someday-listen (append til Someday.md + fjern fra kilden). */
+  private async moveToSomeday(): Promise<void> {
+    try {
+      // Brug den nuværende tekst i feltet (så evt. redigering tages med)
+      const text = this.textEl.value.trim() || this.task.text;
+      await appendSomedayItem(this.app, text);
+
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+      if (this.task.lineNumber < lines.length) {
+        lines.splice(this.task.lineNumber, 1);
+        await this.app.vault.modify(this.task.file, lines.join("\n"));
+      }
+      new Notice("💤 Flyttet til Someday / Maybe");
+      this.close();
+    } catch (err) {
+      console.error("Joner GTD: fejl ved flyt til Someday", err);
+      new Notice("Kunne ikke flytte. Tjek konsollen.");
     }
   }
 

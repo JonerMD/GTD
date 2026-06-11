@@ -32,6 +32,11 @@ function computeIndent(line: string): number {
   return indent;
 }
 
+/** Eksporteret indrykning-helper (bruges af reorder-logik i view'et). */
+export function getLineIndent(line: string): number {
+  return computeIndent(line);
+}
+
 /** Forsøg at parse én markdown-linje som task. Returnerer null hvis det ikke er en task. */
 export function parseTaskLine(
   line: string,

@@ -237,3 +237,145 @@ export function getFrontmatterString(
   if (value === undefined || value === null) return undefined;
   return String(value);
 }
+
+/* ============================================================
+   DATO-UDTRYK ("+1d", "+2m", "3u", absolut dato)
+   ============================================================ */
+
+/** Byg ISO-dato fra år/måned/dag med validering. Returnerer null hvis ugyldig. */
+function isoFromParts(y: number, mo: number, d: number): string | null {
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  const date = new Date(y, mo - 1, d);
+  // Fang ugyldige datoer (fx 31. februar ruller over)
+  if (
+    date.getFullYear() !== y ||
+    date.getMonth() !== mo - 1 ||
+    date.getDate() !== d
+  ) {
+    return null;
+  }
+  const mm = String(mo).padStart(2, "0");
+  const dd = String(d).padStart(2, "0");
+  return `${y}-${mm}-${dd}`;
+}
+
+/** Parse et dato-udtryk til en ISO-dato. Understøtter:
+ *  - Relativt: "+0" (i dag), "+1d"/"1d" (dage), "+2u"/"2w" (uger),
+ *    "+1m" (måneder), "+1y" (år)
+ *  - Absolut ISO: "2026-02-11"
+ *  - Absolut dansk/europæisk: "11.02.2026", "11/02/2026", "11-02-2026" (dag først),
+ *    også med 2-cifret år ("11/02/26")
+ *  Returnerer ISO-dato eller null. */
+export function parseDateExpression(raw: string): string | null {
+  const expr = raw.trim().toLowerCase();
+  if (!expr) return null;
+
+  // ISO: YYYY-MM-DD (år først = 4 cifre)
+  let m = expr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return isoFromParts(+m[1], +m[2], +m[3]);
+
+  // Dansk/europæisk: dd.mm.yyyy | dd/mm/yyyy | dd-mm-yyyy (dag først)
+  m = expr.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+  if (m) {
+    let year = +m[3];
+    if (year < 100) year += 2000;
+    return isoFromParts(year, +m[2], +m[1]);
+  }
+
+  // Relativt udtryk: valgfrit +, tal, enhed (d/u/w/m/y)
+  const rel = expr.match(/^\+?(\d+)\s*([duwmy])?$/);
+  if (!rel) return null;
+  const amount = parseInt(rel[1], 10);
+  const unit = rel[2] ?? "d";
+  if (!Number.isFinite(amount)) return null;
+
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  switch (unit) {
+    case "d":
+      d.setDate(d.getDate() + amount);
+      break;
+    case "u": // uger (dansk)
+    case "w":
+      d.setDate(d.getDate() + amount * 7);
+      break;
+    case "m":
+      d.setMonth(d.getMonth() + amount);
+      break;
+    case "y":
+      d.setFullYear(d.getFullYear() + amount);
+      break;
+    default:
+      return null;
+  }
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/* ============================================================
+   PROJEKT-NOTE (gemt i %% gtd-note-start %% ... %% gtd-note-end %%)
+   ============================================================ */
+
+const NOTE_RE =
+  /%% gtd-note-start %%\n?([\s\S]*?)\n?%% gtd-note-end %%/;
+
+/** Hent projekt-notens tekst fra fil-indhold (tom streng hvis ingen). */
+export function getNoteSection(content: string): string {
+  const m = content.match(NOTE_RE);
+  return m ? m[1] : "";
+}
+
+/** Sæt projekt-notens tekst i fil-indhold. Tom note fjerner blokken. */
+export function setNoteSection(content: string, note: string): string {
+  const trimmed = note.replace(/\s+$/, "");
+  const hasBlock = NOTE_RE.test(content);
+
+  if (trimmed === "") {
+    if (!hasBlock) return content;
+    // Fjern blokken (og evt. omkringliggende blanke linjer)
+    return content
+      .replace(
+        /\n*%% gtd-note-start %%\n?[\s\S]*?\n?%% gtd-note-end %%\n*/,
+        "\n"
+      )
+      .replace(/\n{3,}/g, "\n\n");
+  }
+
+  const block = `%% gtd-note-start %%\n${trimmed}\n%% gtd-note-end %%`;
+  if (hasBlock) {
+    return content.replace(NOTE_RE, block);
+  }
+  // Tilføj i slutningen af filen
+  const sep = content.endsWith("\n") ? "" : "\n";
+  return `${content}${sep}\n${block}\n`;
+}
+
+/* ============================================================
+   SOMEDAY-LISTE (lette items i GTD/Someday.md)
+   ============================================================ */
+
+/** Sikre at Someday.md eksisterer og returnér filen. */
+export async function ensureSomedayFile(app: App): Promise<TFile> {
+  const existing = app.vault.getAbstractFileByPath(SOMEDAY_LOG);
+  if (existing instanceof TFile) return existing;
+  await ensureFolder(app, GTD_FOLDER);
+  return await app.vault.create(
+    SOMEDAY_LOG,
+    "# Someday / Maybe\n\nLet liste over ting du måske vil gøre engang.\n\n"
+  );
+}
+
+/** Append en let someday-item (som en task-linje). */
+export async function appendSomedayItem(
+  app: App,
+  text: string
+): Promise<void> {
+  const file = await ensureSomedayFile(app);
+  const line = `- [ ] ${text} ➕ ${todayISO()}`;
+  const current = await app.vault.read(file);
+  const needsNewline = current.length > 0 && !current.endsWith("\n");
+  const next = current + (needsNewline ? "\n" : "") + line + "\n";
+  await app.vault.modify(file, next);
+}

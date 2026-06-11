@@ -7,6 +7,117 @@
   overflow: hidden;
 }
 
+/* --- Ny mappe-knap i sidebar --- */
+.gtd-add-folder-btn {
+  margin-top: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+  text-align: center;
+}
+.gtd-add-folder-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* --- Fold-ud/ind-trekant på parent-tasks --- */
+.gtd-task-chevron {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  user-select: none;
+}
+.gtd-task-chevron.is-toggleable {
+  cursor: pointer;
+}
+.gtd-task-chevron.is-toggleable:hover {
+  color: var(--text-normal);
+}
+.gtd-task-collapsed-hint {
+  opacity: 0.5;
+}
+
+/* --- Note-felt i inspector --- */
+.gtd-note-area {
+  resize: vertical;
+  min-height: 70px;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+/* --- Dato-udtryk-input --- */
+.gtd-date-expr {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+/* --- Someday-liste actions --- */
+.gtd-someday-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+/* ============================================================
+   MOBIL-LAYOUT (iPhone) — én kolonne ad gangen
+   ============================================================ */
+.gtd-body.gtd-mobile {
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+}
+
+.gtd-body.gtd-mobile .gtd-mobile-sidebar,
+.gtd-body.gtd-mobile .gtd-mobile-main,
+.gtd-body.gtd-mobile .gtd-mobile-inspector {
+  width: 100%;
+  flex: none;
+  border-left: none;
+  border-right: none;
+  box-sizing: border-box;
+}
+
+.gtd-body.gtd-mobile .gtd-mobile-inspector {
+  border-top: 4px solid var(--background-modifier-border);
+}
+
+/* Tilbage-knap på mobil */
+.gtd-mobile-back {
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--interactive-accent);
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+  z-index: 2;
+}
+.gtd-mobile-back:active {
+  background: var(--background-modifier-hover);
+}
+
+/* Gør tabs og rækker mere finger-venlige på mobil */
+.gtd-body.gtd-mobile .gtd-project-item,
+.gtd-body.gtd-mobile .gtd-tag-row,
+.gtd-body.gtd-mobile .gtd-folder-header {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.gtd-body.gtd-mobile .gtd-task {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
 .gtd-dashboard {
   display: flex;
   flex-direction: column;
