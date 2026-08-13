@@ -1,5 +1,5 @@
 import { App, Modal, Notice, TFile } from "obsidian";
-import { Task } from "./task";
+import { Task, assignParents, parseTaskLine } from "./task";
 import {
   INBOX_PATH,
   SINGLE_TASKS_PATH,
@@ -82,20 +82,58 @@ export class TaskEditModal extends Modal {
     this.doneEl.checked = this.task.done;
     doneWrap.createEl("label", { text: "Afsluttet" });
 
-    // HIERARKI (ryk ind / ud — gør tasken til sub-task af den ovenover)
-    const hierWrap = contentEl.createDiv();
-    hierWrap.style.marginTop = "12px";
-    hierWrap.style.display = "flex";
-    hierWrap.style.alignItems = "center";
-    hierWrap.style.gap = "8px";
-    hierWrap.createEl("span", {
-      text: "Hierarki:",
+    // RÆKKEFØLGE & HIERARKI
+    contentEl.createEl("label", {
+      text: "Rækkefølge & hierarki",
       cls: "setting-item-name",
     });
+    const hierWrap = contentEl.createDiv();
+    hierWrap.style.marginTop = "4px";
+    hierWrap.style.display = "flex";
+    hierWrap.style.flexWrap = "wrap";
+    hierWrap.style.gap = "6px";
+
+    const upBtn = hierWrap.createEl("button", { text: "▲ Flyt op" });
+    upBtn.onclick = () => void this.moveBlock(-1);
+    const downBtn = hierWrap.createEl("button", { text: "▼ Flyt ned" });
+    downBtn.onclick = () => void this.moveBlock(1);
     const outdentBtn = hierWrap.createEl("button", { text: "⇤ Ryk ud" });
     outdentBtn.onclick = () => void this.changeIndent(-1);
     const indentBtn = hierWrap.createEl("button", { text: "⇥ Ryk ind" });
     indentBtn.onclick = () => void this.changeIndent(1);
+
+    // NY UNDEROPGAVE
+    const subWrap = contentEl.createDiv();
+    subWrap.style.marginTop = "10px";
+    subWrap.style.display = "flex";
+    subWrap.style.gap = "6px";
+    const subInput = subWrap.createEl("input", {
+      type: "text",
+      attr: { placeholder: "Ny underopgave under denne task…" },
+    });
+    subInput.style.flex = "1";
+    subInput.style.padding = "6px 8px";
+    subInput.style.fontSize = "13px";
+    const addSubBtn = subWrap.createEl("button", {
+      text: "➕ Tilføj",
+      cls: "mod-cta",
+    });
+    const doAddSub = async () => {
+      const t = subInput.value.trim();
+      if (!t) return;
+      const ok = await this.addSubtask(t);
+      if (ok) {
+        subInput.value = "";
+        subInput.focus();
+      }
+    };
+    addSubBtn.onclick = () => void doAddSub();
+    subInput.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void doAddSub();
+      }
+    });
 
     // KNAPPER
     const buttonRow = contentEl.createDiv();
@@ -352,6 +390,122 @@ export class TaskEditModal extends Modal {
     } catch (err) {
       console.error("Joner GTD: fejl ved indrykning", err);
       new Notice("Kunne ikke ændre hierarki.");
+    }
+  }
+
+  /** Beregn indrykning af en linje (tab = 4). */
+  private indentOf(l: string): number {
+    let n = 0;
+    for (const c of l) {
+      if (c === " ") n++;
+      else if (c === "\t") n += 4;
+      else break;
+    }
+    return n;
+  }
+
+  /** [start, end) for tasken + dens efterfølgende mere-indrykkede linjer. */
+  private blockRange(lines: string[], start: number, indent: number): [number, number] {
+    let end = start + 1;
+    while (end < lines.length) {
+      const l = lines[end];
+      if (l.trim() === "") break;
+      if (this.indentOf(l) > indent) end++;
+      else break;
+    }
+    return [start, end];
+  }
+
+  /** Flyt tasken (med dens sub-tasks) op/ned forbi nabo-søskende. */
+  private async moveBlock(dir: -1 | 1): Promise<void> {
+    try {
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+
+      // Parse alle tasks i filen for at finde søskende
+      const tasks: Task[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const parsed = parseTaskLine(lines[i], this.task.file, i);
+        if (parsed) tasks.push(parsed);
+      }
+      assignParents(tasks);
+
+      const me = tasks.find((t) => t.lineNumber === this.task.lineNumber);
+      if (!me) {
+        new Notice("Kunne ikke finde tasken — filen er måske ændret.");
+        return;
+      }
+      const siblings = tasks
+        .filter((t) => t.indent === me.indent && t.parentLine === me.parentLine)
+        .sort((a, b) => a.lineNumber - b.lineNumber);
+      const idx = siblings.findIndex((t) => t.lineNumber === me.lineNumber);
+      const target = siblings[idx + dir];
+      if (!target) {
+        new Notice(dir === -1 ? "Allerede øverst." : "Allerede nederst.");
+        return;
+      }
+
+      const [bStart, bEnd] = this.blockRange(lines, me.lineNumber, me.indent);
+      const [tStart, tEnd] = this.blockRange(
+        lines,
+        target.lineNumber,
+        target.indent
+      );
+
+      let newLines: string[];
+      if (dir === -1) {
+        newLines = [
+          ...lines.slice(0, tStart),
+          ...lines.slice(bStart, bEnd),
+          ...lines.slice(tEnd, bStart),
+          ...lines.slice(tStart, tEnd),
+          ...lines.slice(bEnd),
+        ];
+      } else {
+        newLines = [
+          ...lines.slice(0, bStart),
+          ...lines.slice(tStart, tEnd),
+          ...lines.slice(bEnd, tStart),
+          ...lines.slice(bStart, bEnd),
+          ...lines.slice(tEnd),
+        ];
+      }
+
+      await this.app.vault.modify(this.task.file, newLines.join("\n"));
+      new Notice(dir === -1 ? "▲ Flyttet op" : "▼ Flyttet ned");
+      this.close();
+    } catch (err) {
+      console.error("Joner GTD: fejl ved flytning", err);
+      new Notice("Kunne ikke flytte tasken.");
+    }
+  }
+
+  /** Indsæt en ny underopgave (et niveau dybere) sidst blandt tasken's børn.
+   *  Returnerer true ved succes. Lukker IKKE modalen (så man kan tilføje flere). */
+  private async addSubtask(text: string): Promise<boolean> {
+    try {
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+      const start = this.task.lineNumber;
+      if (start >= lines.length) return false;
+
+      // Bevar tasken's leading whitespace, tilføj én tab for barnet
+      const leadingWs = lines[start].match(/^\s*/)?.[0] ?? "";
+      const childPrefix = leadingWs + "\t";
+
+      const baseIndent = this.indentOf(lines[start]);
+      const [, blockEnd] = this.blockRange(lines, start, baseIndent);
+
+      const newLine = `${childPrefix}- [ ] ${text} ➕ ${todayISO()}`;
+      lines.splice(blockEnd, 0, newLine);
+
+      await this.app.vault.modify(this.task.file, lines.join("\n"));
+      new Notice(`➕ Underopgave tilføjet: ${text}`);
+      return true;
+    } catch (err) {
+      console.error("Joner GTD: fejl ved underopgave", err);
+      new Notice("Kunne ikke tilføje underopgave.");
+      return false;
     }
   }
 

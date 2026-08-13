@@ -460,19 +460,55 @@ var TaskEditModal = class extends import_obsidian2.Modal {
     this.doneEl = doneWrap.createEl("input", { type: "checkbox" });
     this.doneEl.checked = this.task.done;
     doneWrap.createEl("label", { text: "Afsluttet" });
-    const hierWrap = contentEl.createDiv();
-    hierWrap.style.marginTop = "12px";
-    hierWrap.style.display = "flex";
-    hierWrap.style.alignItems = "center";
-    hierWrap.style.gap = "8px";
-    hierWrap.createEl("span", {
-      text: "Hierarki:",
+    contentEl.createEl("label", {
+      text: "R\xE6kkef\xF8lge & hierarki",
       cls: "setting-item-name"
     });
+    const hierWrap = contentEl.createDiv();
+    hierWrap.style.marginTop = "4px";
+    hierWrap.style.display = "flex";
+    hierWrap.style.flexWrap = "wrap";
+    hierWrap.style.gap = "6px";
+    const upBtn = hierWrap.createEl("button", { text: "\u25B2 Flyt op" });
+    upBtn.onclick = () => void this.moveBlock(-1);
+    const downBtn = hierWrap.createEl("button", { text: "\u25BC Flyt ned" });
+    downBtn.onclick = () => void this.moveBlock(1);
     const outdentBtn = hierWrap.createEl("button", { text: "\u21E4 Ryk ud" });
     outdentBtn.onclick = () => void this.changeIndent(-1);
     const indentBtn = hierWrap.createEl("button", { text: "\u21E5 Ryk ind" });
     indentBtn.onclick = () => void this.changeIndent(1);
+    const subWrap = contentEl.createDiv();
+    subWrap.style.marginTop = "10px";
+    subWrap.style.display = "flex";
+    subWrap.style.gap = "6px";
+    const subInput = subWrap.createEl("input", {
+      type: "text",
+      attr: { placeholder: "Ny underopgave under denne task\u2026" }
+    });
+    subInput.style.flex = "1";
+    subInput.style.padding = "6px 8px";
+    subInput.style.fontSize = "13px";
+    const addSubBtn = subWrap.createEl("button", {
+      text: "\u2795 Tilf\xF8j",
+      cls: "mod-cta"
+    });
+    const doAddSub = async () => {
+      const t = subInput.value.trim();
+      if (!t)
+        return;
+      const ok = await this.addSubtask(t);
+      if (ok) {
+        subInput.value = "";
+        subInput.focus();
+      }
+    };
+    addSubBtn.onclick = () => void doAddSub();
+    subInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void doAddSub();
+      }
+    });
     const buttonRow = contentEl.createDiv();
     buttonRow.style.marginTop = "18px";
     buttonRow.style.display = "flex";
@@ -695,6 +731,114 @@ var TaskEditModal = class extends import_obsidian2.Modal {
     } catch (err) {
       console.error("Joner GTD: fejl ved indrykning", err);
       new import_obsidian2.Notice("Kunne ikke \xE6ndre hierarki.");
+    }
+  }
+  /** Beregn indrykning af en linje (tab = 4). */
+  indentOf(l) {
+    let n = 0;
+    for (const c of l) {
+      if (c === " ")
+        n++;
+      else if (c === "	")
+        n += 4;
+      else
+        break;
+    }
+    return n;
+  }
+  /** [start, end) for tasken + dens efterfølgende mere-indrykkede linjer. */
+  blockRange(lines, start, indent) {
+    let end = start + 1;
+    while (end < lines.length) {
+      const l = lines[end];
+      if (l.trim() === "")
+        break;
+      if (this.indentOf(l) > indent)
+        end++;
+      else
+        break;
+    }
+    return [start, end];
+  }
+  /** Flyt tasken (med dens sub-tasks) op/ned forbi nabo-søskende. */
+  async moveBlock(dir) {
+    try {
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+      const tasks = [];
+      for (let i = 0; i < lines.length; i++) {
+        const parsed = parseTaskLine(lines[i], this.task.file, i);
+        if (parsed)
+          tasks.push(parsed);
+      }
+      assignParents(tasks);
+      const me = tasks.find((t) => t.lineNumber === this.task.lineNumber);
+      if (!me) {
+        new import_obsidian2.Notice("Kunne ikke finde tasken \u2014 filen er m\xE5ske \xE6ndret.");
+        return;
+      }
+      const siblings = tasks.filter((t) => t.indent === me.indent && t.parentLine === me.parentLine).sort((a, b) => a.lineNumber - b.lineNumber);
+      const idx = siblings.findIndex((t) => t.lineNumber === me.lineNumber);
+      const target = siblings[idx + dir];
+      if (!target) {
+        new import_obsidian2.Notice(dir === -1 ? "Allerede \xF8verst." : "Allerede nederst.");
+        return;
+      }
+      const [bStart, bEnd] = this.blockRange(lines, me.lineNumber, me.indent);
+      const [tStart, tEnd] = this.blockRange(
+        lines,
+        target.lineNumber,
+        target.indent
+      );
+      let newLines;
+      if (dir === -1) {
+        newLines = [
+          ...lines.slice(0, tStart),
+          ...lines.slice(bStart, bEnd),
+          ...lines.slice(tEnd, bStart),
+          ...lines.slice(tStart, tEnd),
+          ...lines.slice(bEnd)
+        ];
+      } else {
+        newLines = [
+          ...lines.slice(0, bStart),
+          ...lines.slice(tStart, tEnd),
+          ...lines.slice(bEnd, tStart),
+          ...lines.slice(bStart, bEnd),
+          ...lines.slice(tEnd)
+        ];
+      }
+      await this.app.vault.modify(this.task.file, newLines.join("\n"));
+      new import_obsidian2.Notice(dir === -1 ? "\u25B2 Flyttet op" : "\u25BC Flyttet ned");
+      this.close();
+    } catch (err) {
+      console.error("Joner GTD: fejl ved flytning", err);
+      new import_obsidian2.Notice("Kunne ikke flytte tasken.");
+    }
+  }
+  /** Indsæt en ny underopgave (et niveau dybere) sidst blandt tasken's børn.
+   *  Returnerer true ved succes. Lukker IKKE modalen (så man kan tilføje flere). */
+  async addSubtask(text) {
+    var _a, _b;
+    try {
+      const content = await this.app.vault.read(this.task.file);
+      const lines = content.split("\n");
+      const start = this.task.lineNumber;
+      if (start >= lines.length)
+        return false;
+      const leadingWs = (_b = (_a = lines[start].match(/^\s*/)) == null ? void 0 : _a[0]) != null ? _b : "";
+      const childPrefix = leadingWs + "	";
+      const baseIndent = this.indentOf(lines[start]);
+      const [, blockEnd] = this.blockRange(lines, start, baseIndent);
+      const newLine = `${childPrefix}- [ ] ${text} \u2795 ${todayISO()}`;
+      lines.splice(blockEnd, 0, newLine);
+      await this.app.vault.modify(this.task.file, lines.join("\n"));
+      new import_obsidian2.Notice(`\u2795 Underopgave tilf\xF8jet: ${text}`);
+      return true;
+    } catch (err) {
+      console.error("Joner GTD: fejl ved underopgave", err);
+      new import_obsidian2.Notice("Kunne ikke tilf\xF8je underopgave.");
+      return false;
     }
   }
   /** Flyt tasken til Someday-listen (append til Someday.md + fjern fra kilden). */
