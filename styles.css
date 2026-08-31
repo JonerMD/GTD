@@ -65,6 +65,28 @@
   align-items: center;
 }
 
+/* --- Someday-grupper --- */
+.gtd-someday-group {
+  margin-bottom: 20px;
+}
+.gtd-someday-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 2px solid var(--background-modifier-border);
+  margin-bottom: 4px;
+}
+.gtd-someday-group-name {
+  font-weight: 600;
+  font-size: 14px;
+  flex: 1;
+}
+.gtd-someday-group-count {
+  font-size: 12px;
+  opacity: 0.5;
+}
+
 /* ============================================================
    MOBIL-LAYOUT (iPhone) — én kolonne ad gangen
    ============================================================ */

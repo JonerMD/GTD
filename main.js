@@ -405,9 +405,15 @@ async function appendSomedayItem(app, text) {
   const file = await ensureSomedayFile(app);
   const line = `- [ ] ${text} \u2795 ${todayISO()}`;
   const current = await app.vault.read(file);
-  const needsNewline = current.length > 0 && !current.endsWith("\n");
-  const next = current + (needsNewline ? "\n" : "") + line + "\n";
-  await app.vault.modify(file, next);
+  const lines = current.split("\n");
+  const firstHeading = lines.findIndex((l) => /^##\s+/.test(l));
+  if (firstHeading === -1) {
+    const needsNewline = current.length > 0 && !current.endsWith("\n");
+    await app.vault.modify(file, current + (needsNewline ? "\n" : "") + line + "\n");
+    return;
+  }
+  lines.splice(firstHeading, 0, line);
+  await app.vault.modify(file, lines.join("\n"));
 }
 
 // src/task-edit-modal.ts
@@ -2129,50 +2135,188 @@ ${pastDue.length} item${pastDue.length === 1 ? "" : "s"}`);
      ============================================================ */
   async renderSomedayMain(parent) {
     const file = await ensureSomedayFile(this.app);
-    const tasks = await this.tasksInFile(file);
-    const open = tasks.filter((t) => !t.done);
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    const groups = [];
+    let current = { heading: null, headingLine: null, items: [] };
+    groups.push(current);
+    for (let i = 0; i < lines.length; i++) {
+      const h = lines[i].match(/^##\s+(.+?)\s*$/);
+      if (h) {
+        current = { heading: h[1], headingLine: i, items: [] };
+        groups.push(current);
+        continue;
+      }
+      const task = parseTaskLine(lines[i], file, i);
+      if (task && !task.done)
+        current.items.push(task);
+    }
+    const totalOpen = groups.reduce((n, g) => n + g.items.length, 0);
     const header = parent.createDiv({ cls: "gtd-main-header" });
     header.createEl("h2", {
       text: "\u{1F4A4} Someday / Maybe",
       cls: "gtd-main-title"
     });
     header.createSpan({
-      text: `${open.length} items`,
+      text: `${totalOpen} items`,
       cls: "gtd-main-stats"
     });
-    parent.createEl("p", {
-      text: "Lette ting du m\xE5ske vil g\xF8re engang. Klik \u201C\u{1F4C1} Lav til projekt\u201D for at g\xF8re en til et rigtigt projekt. (Parkerede projekter vises i listen til venstre.)",
-      cls: "gtd-empty-text"
+    const newGroupBtn = header.createEl("button", {
+      text: "+ Ny gruppe",
+      cls: "gtd-action-btn"
     });
-    if (open.length === 0) {
+    newGroupBtn.style.marginLeft = "auto";
+    newGroupBtn.onclick = () => {
+      new TextPromptModal(
+        this.app,
+        "\u{1F4C2} Ny gruppe",
+        "Gruppenavn (fx Spil, Ungerne)",
+        "",
+        async (raw) => {
+          const name = raw.trim();
+          if (!name)
+            return;
+          await this.addSomedayGroup(file, name);
+          void this.render();
+        }
+      ).open();
+    };
+    if (totalOpen === 0 && groups.every((g) => g.heading === null)) {
       const empty = parent.createDiv({ cls: "gtd-empty" });
       empty.createDiv({ text: "\u{1F4A4}", cls: "gtd-empty-icon" });
       empty.createDiv({
-        text: "Ingen someday-items. Tilf\xF8j nedenfor, eller flyt et inbox-item hertil.",
+        text: "Ingen someday-items. Tilf\xF8j nedenfor, lav en gruppe, eller flyt et inbox-item hertil.",
         cls: "gtd-empty-text"
       });
-    } else {
-      const list = parent.createEl("ul", { cls: "gtd-task-list" });
-      for (const task of open) {
-        const li = list.createEl("li", { cls: "gtd-task" });
-        const body = li.createDiv({ cls: "gtd-task-body" });
-        const textEl = body.createDiv({
-          text: task.text,
-          cls: "gtd-task-text"
+    }
+    for (const g of groups) {
+      if (g.heading === null && g.items.length === 0)
+        continue;
+      const section = parent.createDiv({ cls: "gtd-someday-group" });
+      const gh = section.createDiv({ cls: "gtd-someday-group-header" });
+      gh.createSpan({
+        text: g.heading === null ? "Uden gruppe" : `\u{1F4C2} ${g.heading}`,
+        cls: "gtd-someday-group-name"
+      });
+      gh.createSpan({
+        text: String(g.items.length),
+        cls: "gtd-someday-group-count"
+      });
+      if (g.heading !== null && g.headingLine !== null) {
+        const delGroupBtn = gh.createEl("button", {
+          text: "\u{1F5D1}",
+          cls: "gtd-clear-btn"
         });
-        textEl.onclick = () => new TaskEditModal(this.app, task).open();
-        const actions = li.createDiv({ cls: "gtd-someday-actions" });
-        const toProjectBtn = actions.createEl("button", {
-          text: "\u{1F4C1} Lav til projekt",
-          cls: "gtd-action-btn"
-        });
-        toProjectBtn.onclick = (e) => {
-          e.stopPropagation();
-          void this.convertSomedayToProject(task);
+        delGroupBtn.setAttribute("aria-label", "Fjern gruppe (items flyttes op)");
+        const headingLine = g.headingLine;
+        delGroupBtn.onclick = async () => {
+          const ok = window.confirm(
+            `Fjern gruppen "${g.heading}"?
+
+Items i gruppen slettes ikke \u2014 de flyttes bare ud af gruppen.`
+          );
+          if (!ok)
+            return;
+          await this.removeLineFromFile(file, headingLine);
+          void this.render();
         };
       }
+      const list = section.createEl("ul", { cls: "gtd-task-list" });
+      for (const task of g.items) {
+        this.renderSomedayItemRow(list, task);
+      }
+      const groupHeading = g.heading;
+      this.renderSomedayGroupAddInput(section, file, groupHeading);
     }
-    this.renderAddTaskInput(parent, file, "+ Tilf\xF8j someday-item\u2026");
+  }
+  renderSomedayItemRow(parent, task) {
+    const li = parent.createEl("li", { cls: "gtd-task" });
+    const body = li.createDiv({ cls: "gtd-task-body" });
+    const textEl = body.createDiv({ text: task.text, cls: "gtd-task-text" });
+    textEl.onclick = () => new TaskEditModal(this.app, task).open();
+    const actions = li.createDiv({ cls: "gtd-someday-actions" });
+    const toProjectBtn = actions.createEl("button", {
+      text: "\u{1F4C1} Lav til projekt",
+      cls: "gtd-action-btn"
+    });
+    toProjectBtn.onclick = (e) => {
+      e.stopPropagation();
+      void this.convertSomedayToProject(task);
+    };
+    const delBtn = actions.createEl("button", {
+      text: "\u{1F5D1}",
+      cls: "gtd-action-btn"
+    });
+    delBtn.setAttribute("aria-label", "Slet item");
+    delBtn.onclick = async (e) => {
+      e.stopPropagation();
+      await this.removeLineFromFile(task.file, task.lineNumber);
+      void this.render();
+    };
+  }
+  renderSomedayGroupAddInput(parent, file, groupHeading) {
+    const wrapper = parent.createDiv({ cls: "gtd-add-task" });
+    const input = wrapper.createEl("input", {
+      type: "text",
+      cls: "gtd-add-task-input",
+      attr: {
+        placeholder: groupHeading === null ? "+ Tilf\xF8j someday-item\u2026" : `+ Tilf\xF8j til "${groupHeading}"\u2026`
+      }
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text)
+          return;
+        input.value = "";
+        void this.appendSomedayItemToGroup(file, groupHeading, text);
+      }
+    });
+  }
+  /** Tilføj en ny gruppe-overskrift i slutningen af Someday.md. */
+  async addSomedayGroup(file, name) {
+    const content = await this.app.vault.read(file);
+    const sep = content.endsWith("\n") ? "" : "\n";
+    await this.app.vault.modify(file, `${content}${sep}
+## ${name}
+`);
+  }
+  /** Indsæt et someday-item i en bestemt gruppe (eller "uden gruppe"). */
+  async appendSomedayItemToGroup(file, groupHeading, text) {
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    const line = `- [ ] ${text} \u2795 ${todayISO()}`;
+    if (groupHeading === null) {
+      const firstHeading = lines.findIndex((l) => /^##\s+/.test(l));
+      if (firstHeading === -1) {
+        const sep = content.endsWith("\n") || content === "" ? "" : "\n";
+        await this.app.vault.modify(file, content + sep + line + "\n");
+        return;
+      }
+      lines.splice(firstHeading, 0, line);
+      await this.app.vault.modify(file, lines.join("\n"));
+      return;
+    }
+    const hi = lines.findIndex(
+      (l) => {
+        var _a;
+        return ((_a = l.match(/^##\s+(.+?)\s*$/)) == null ? void 0 : _a[1]) === groupHeading;
+      }
+    );
+    if (hi === -1) {
+      const sep = content.endsWith("\n") ? "" : "\n";
+      await this.app.vault.modify(file, content + sep + line + "\n");
+      return;
+    }
+    let end = hi + 1;
+    while (end < lines.length && !/^##\s+/.test(lines[end]))
+      end++;
+    let insertAt = end;
+    while (insertAt > hi + 1 && lines[insertAt - 1].trim() === "")
+      insertAt--;
+    lines.splice(insertAt, 0, line);
+    await this.app.vault.modify(file, lines.join("\n"));
   }
   /** Lav et someday-item om til et aktivt projekt og fjern det fra Someday-listen. */
   async convertSomedayToProject(task) {

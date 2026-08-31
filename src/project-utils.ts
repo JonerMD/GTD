@@ -367,7 +367,8 @@ export async function ensureSomedayFile(app: App): Promise<TFile> {
   );
 }
 
-/** Append en let someday-item (som en task-linje). */
+/** Append en let someday-item (som en task-linje). Lander i "uden gruppe"-området
+ *  (før første ## gruppe-overskrift), så det ikke ryger ind i en tilfældig gruppe. */
 export async function appendSomedayItem(
   app: App,
   text: string
@@ -375,7 +376,13 @@ export async function appendSomedayItem(
   const file = await ensureSomedayFile(app);
   const line = `- [ ] ${text} ➕ ${todayISO()}`;
   const current = await app.vault.read(file);
-  const needsNewline = current.length > 0 && !current.endsWith("\n");
-  const next = current + (needsNewline ? "\n" : "") + line + "\n";
-  await app.vault.modify(file, next);
+  const lines = current.split("\n");
+  const firstHeading = lines.findIndex((l) => /^##\s+/.test(l));
+  if (firstHeading === -1) {
+    const needsNewline = current.length > 0 && !current.endsWith("\n");
+    await app.vault.modify(file, current + (needsNewline ? "\n" : "") + line + "\n");
+    return;
+  }
+  lines.splice(firstHeading, 0, line);
+  await app.vault.modify(file, lines.join("\n"));
 }
